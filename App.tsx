@@ -5,59 +5,68 @@ import Calendar from './components/Calendar';
 import ChatInterface from './components/ChatInterface';
 import DiaryEntryView from './components/DiaryEntryView';
 import { generateAgentResponse } from './services/geminiService';
+import { storageService } from './services/storage';
 
 const App: React.FC = () => {
-  // State: Diary Entries (Persisted in LocalStorage)
-  const [diaryEntries, setDiaryEntries] = useState<Record<string, DiaryEntry>>(() => {
-    const saved = localStorage.getItem('mindful_journal_entries');
-    return saved ? JSON.parse(saved) : {};
-  });
-
-  // State: Chat History (Persisted)
-  const [chatHistory, setChatHistory] = useState<ChatMessage[]>(() => {
-    const saved = localStorage.getItem('mindful_journal_chat');
-    return saved ? JSON.parse(saved) : [{
-      id: 'welcome',
-      role: 'model',
-      text: 'Hello! I am your personal diary agent. How was your day? I can help you write your entry for today or find past memories.',
-      timestamp: Date.now()
-    }];
-  });
-
-  // State: UI
+  // State
+  const [diaryEntries, setDiaryEntries] = useState<Record<string, DiaryEntry>>({});
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isLoadingData, setIsLoadingData] = useState(true);
 
-  // Persistence Effects
+  // Initial Data Load
   useEffect(() => {
-    localStorage.setItem('mindful_journal_entries', JSON.stringify(diaryEntries));
-  }, [diaryEntries]);
-
-  useEffect(() => {
-    localStorage.setItem('mindful_journal_chat', JSON.stringify(chatHistory));
-  }, [chatHistory]);
+    const loadData = async () => {
+      try {
+        const [entries, chat] = await Promise.all([
+          storageService.loadEntries(),
+          storageService.loadChat()
+        ]);
+        
+        setDiaryEntries(entries);
+        
+        if (chat.length === 0) {
+            setChatHistory([{
+                id: 'welcome',
+                role: 'model',
+                text: 'Hello! I am your personal diary agent. I am connected to your Google Database. How was your day?',
+                timestamp: Date.now()
+            }]);
+        } else {
+            setChatHistory(chat);
+        }
+      } catch (err) {
+        console.error("Failed to load data", err);
+      } finally {
+        setIsLoadingData(false);
+      }
+    };
+    
+    loadData();
+  }, []);
 
   const handleDateSelect = (date: Date) => {
     setSelectedDate(date);
   };
 
-  const handleManualSave = (content: string) => {
+  const handleManualSave = async (content: string) => {
     const key = formatDateKey(selectedDate);
     const updatedEntry: DiaryEntry = {
       date: key,
       content,
       lastUpdated: Date.now(),
-      mood: 'neutral' // Could be enhanced with analysis
+      mood: 'neutral'
     };
     
-    setDiaryEntries(prev => ({
-      ...prev,
-      [key]: updatedEntry
-    }));
+    // Optimistic Update
+    setDiaryEntries(prev => ({ ...prev, [key]: updatedEntry }));
+    
+    // Persist
+    await storageService.saveEntry(updatedEntry);
   };
 
   const handleSendMessage = async (text: string) => {
-    // Optimistic UI update
     const userMsg: ChatMessage = {
       id: Date.now().toString(),
       role: 'user',
@@ -65,7 +74,10 @@ const App: React.FC = () => {
       timestamp: Date.now()
     };
     
+    // Optimistic & Persist User Msg
     setChatHistory(prev => [...prev, userMsg]);
+    storageService.saveMessage(userMsg); // Fire and forget
+    
     setIsProcessing(true);
 
     try {
@@ -78,34 +90,35 @@ const App: React.FC = () => {
         text
       );
 
-      // Handle Tool Calls (e.g., Update Diary)
       let finalResponseText = responseText;
 
+      // Handle Tool Calls (Database Updates)
       if (toolCalls && toolCalls.length > 0) {
         for (const call of toolCalls) {
           if (call.name === 'updateDiary') {
             const { date, content, mood } = call.args;
             
-            // Execute Tool
-            setDiaryEntries(prev => ({
-              ...prev,
-              [date]: {
+            const updatedEntry: DiaryEntry = {
                 date,
                 content,
                 mood: mood || 'neutral',
                 lastUpdated: Date.now()
-              }
+            };
+
+            // Update State
+            setDiaryEntries(prev => ({
+              ...prev,
+              [date]: updatedEntry
             }));
             
-            // Provide feedback if the model didn't explicitly say something about the update
+            // Persist to DB
+            await storageService.saveEntry(updatedEntry);
+            
             if (!finalResponseText) {
-                finalResponseText = `I've updated your diary entry for ${date}.`;
+                finalResponseText = `I've saved that entry for ${date}.`;
             }
             
-            // If the updated date is different from selected, switch view? 
-            // Optional, but staying on selected is safer or switching to the updated one.
-            // Let's switch to the updated date if it's not the current one.
-            const updatedDateObj = new Date(date + 'T12:00:00'); // Avoiding timezone shifts
+            const updatedDateObj = new Date(date + 'T12:00:00');
             if (formatDateKey(updatedDateObj) !== selectedDateKey) {
                 setSelectedDate(updatedDateObj);
             }
@@ -116,18 +129,19 @@ const App: React.FC = () => {
       const modelMsg: ChatMessage = {
         id: (Date.now() + 1).toString(),
         role: 'model',
-        text: finalResponseText || "I've processed that for you.",
+        text: finalResponseText || "I've processed that.",
         timestamp: Date.now()
       };
 
       setChatHistory(prev => [...prev, modelMsg]);
+      await storageService.saveMessage(modelMsg);
 
     } catch (error) {
       console.error(error);
       const errorMsg: ChatMessage = {
         id: (Date.now() + 1).toString(),
         role: 'model',
-        text: "I encountered an error connecting to my services. Please try again.",
+        text: "I encountered an error interacting with the database/agent. Please try again.",
         timestamp: Date.now()
       };
       setChatHistory(prev => [...prev, errorMsg]);
@@ -138,6 +152,17 @@ const App: React.FC = () => {
 
   const selectedDateKey = formatDateKey(selectedDate);
   const currentEntry = diaryEntries[selectedDateKey];
+
+  if (isLoadingData) {
+      return (
+          <div className="min-h-screen flex items-center justify-center bg-stone-100 text-stone-500">
+              <div className="flex flex-col items-center gap-3">
+                  <div className="w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
+                  <p>Loading your journal...</p>
+              </div>
+          </div>
+      );
+  }
 
   return (
     <div className="min-h-screen flex flex-col p-4 md:p-6 gap-6 max-w-7xl mx-auto">
@@ -151,7 +176,7 @@ const App: React.FC = () => {
           </div>
           <div>
              <h1 className="text-xl font-bold text-stone-800 tracking-tight">MindfulJournal</h1>
-             <p className="text-xs text-stone-500 font-medium">AI-Powered Reflection</p>
+             <p className="text-xs text-stone-500 font-medium">AI Agent + Google Firestore</p>
           </div>
         </div>
       </header>
@@ -168,9 +193,8 @@ const App: React.FC = () => {
             entries={diaryEntries}
           />
           
-          {/* Quick Info / Hints */}
           <div className="bg-white p-5 rounded-xl border border-stone-200 shadow-sm">
-             <h4 className="font-semibold text-stone-700 mb-2 text-sm">Suggestions</h4>
+             <h4 className="font-semibold text-stone-700 mb-2 text-sm">Ask your Journal</h4>
              <ul className="text-sm text-stone-500 space-y-2">
                  <li className="flex gap-2 items-start cursor-pointer hover:text-indigo-600 transition-colors" onClick={() => handleSendMessage("What did I do last weekend?")}>
                     <span className="mt-1 block w-1.5 h-1.5 rounded-full bg-indigo-300"></span>

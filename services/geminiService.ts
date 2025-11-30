@@ -1,7 +1,7 @@
 import { GoogleGenAI, FunctionDeclaration, Type, Tool } from "@google/genai";
 import { DiaryEntry, ChatMessage } from "../types";
 
-const apiKey = process.env.API_KEY || ''; // Fallback not needed in production but safe for TS
+const apiKey = process.env.API_KEY || ''; 
 
 const ai = new GoogleGenAI({ apiKey });
 
@@ -18,7 +18,7 @@ const updateDiaryTool: FunctionDeclaration = {
       },
       content: {
         type: Type.STRING,
-        description: 'The full text content of the diary entry. It should be written in a diary style (first person).',
+        description: 'The full text content of the diary entry. It should be written in a diary style (first person). If there is existing content for this day, merge the new information naturally.',
       },
       mood: {
         type: Type.STRING,
@@ -41,7 +41,8 @@ export const generateAgentResponse = async (
   try {
     // 1. Construct Context from existing diaries (summarized for token efficiency)
     const diaryContext = Object.values(currentDiaryEntries)
-      .map(e => `[Date: ${e.date}, Content Snippet: ${e.content.substring(0, 100)}...]`)
+      .sort((a, b) => b.date.localeCompare(a.date)) // Sort newest first
+      .map(e => `[Date: ${e.date}, Content: ${e.content}]`)
       .join('\n');
 
     const systemInstruction = `
@@ -50,29 +51,25 @@ export const generateAgentResponse = async (
       Your Goals:
       1. Help the user reflect on their day and write meaningful diary entries.
       2. If the user tells you about events, thoughts, or feelings, OFFER to write them down or automatically use the 'updateDiary' tool to save them.
-      3. If the user asks about past events, use the provided DIARY INDEX context to answer.
-      4. When writing a diary entry, make it beautifully written, introspective, and clear. Expand on the user's rough notes.
+      3. **CRITICAL**: If the user asks about past events ("What did I do last week?", "When did I go to the park?"), SEARCH the "DIARY INDEX" provided below and answer based on that fact.
+      4. When writing a diary entry, make it beautifully written, introspective, and clear. 
+      5. **MERGING**: If the "Current Context" or "DIARY INDEX" shows an entry already exists for the target date, you must COMBINE the new information with the existing text, unless the user specifically asks to overwrite/replace it.
       
       Current Context:
       - Today is: ${new Date().toDateString()}
       - Currently viewing/editing date: ${selectedDate}
       
-      DIARY INDEX (Past Knowledge):
+      DIARY INDEX (Past Knowledge - Use this to answer memory questions):
       ${diaryContext}
     `;
 
     const model = 'gemini-2.5-flash';
     
-    // Prepare chat history for the API
-    // We only take the last 10 messages to keep context clean, plus the new user message
-    const recentHistory = history.slice(-10).map(msg => ({
+    const recentHistory = history.slice(-15).map(msg => ({
         role: msg.role,
         parts: [{ text: msg.text }]
     }));
 
-    // Send message using generateContent (stateless for this function, but simulated chat)
-    // In a real app, we might use ai.chats.create, but here we want to inject dynamic system instruction every time based on diary state.
-    
     const contents = [
         ...recentHistory,
         { role: 'user', parts: [{ text: userMessage }] }
