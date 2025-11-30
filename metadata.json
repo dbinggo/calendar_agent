@@ -1,0 +1,5 @@
+{
+  "name": "MindfulJournal Agent",
+  "description": "An intelligent diary application powered by Gemini. It features a calendar view, a rich text diary editor, and a conversational agent that can draft entries and recall memories.",
+  "requestFramePermissions": []
+}
